@@ -1,0 +1,185 @@
+import time
+import re
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from bs4 import BeautifulSoup
+import requests
+CHROME_DRIVER_PATH = None  
+HEADLESS_MODE = True  
+SELENIUM_TIMEOUT = 10 
+
+def setup_driver():
+    options = Options()
+    if HEADLESS_MODE:
+        options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    
+    try:
+        if CHROME_DRIVER_PATH:
+            service = Service(executable_path=CHROME_DRIVER_PATH)
+            driver = webdriver.Chrome(service=service, options=options)
+        else:
+            driver = webdriver.Chrome(options=options)
+        return driver
+    except WebDriverException as e:
+        print(f"Error setting up WebDriver: {e}")
+        print("Please ensure ChromeDriver is installed and accessible.")
+        return None
+
+def get_top_250_movies():
+    
+    driver = setup_driver()
+    if not driver:
+        return []
+    
+    movies = []
+    try:
+        print("Fetching top 250 movies from IMDb...")
+        driver.get("https://www.imdb.com/chart/top/")
+        wait = WebDriverWait(driver, SELENIUM_TIMEOUT)
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, 'ipc-metadata-list-summary-item')))
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        movie_items = soup.find_all('li', class_='ipc-metadata-list-summary-item')
+        
+        for item in movie_items:
+            title_element = item.find('h3', class_='ipc-title__text')
+            if title_element:
+                title_text = title_element.text.strip()
+                rank_match = re.match(r'(\d+)\.\s*(.*)', title_text)
+                if rank_match:
+                    rank = rank_match.group(1)
+                    title = rank_match.group(2)
+                else:
+                    rank = None
+                    title = title_text
+                
+               
+                link_element = item.find('a', class_='ipc-title-link-wrapper')
+                if link_element and link_element.has_attr('href'):
+                    url = "https://www.imdb.com" + link_element['href']
+                else:
+                    url = None
+                metadata_div = item.find('div', class_='cli-title-metadata')
+                year = None
+                if metadata_div:
+                    first_span = metadata_div.find('span')
+                    if first_span:
+                        year_text = first_span.text.strip()
+                        if year_text.isdigit() and len(year_text) == 4:
+                            year = year_text
+                rating_element = item.find('span', class_='ipc-rating-star')
+                rating = rating_element.text.strip() if rating_element else None
+                
+                movies.append({
+                    'rank': rank,
+                    'title': title,
+                    'year': year, 
+                    'rating': rating,
+                    'url': url
+                })
+
+        print(f"Successfully fetched {len(movies)} movies from IMDb's top 250 list.")
+        return movies
+    
+    except TimeoutException:
+        print("Timed out waiting for IMDb top 250 page to load.")
+        return []
+    except Exception as e:
+        print(f"An error occurred while fetching top 250 movies: {e}")
+        return []
+    finally:
+        driver.quit()
+
+def get_movie_details(url: str) -> dict:
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        details = {}
+        title_tag = soup.find('h1', {'data-testid': 'hero__pageTitle'})
+        details['Movie Name'] = title_tag.text.strip() if title_tag else "N/A"
+        
+        plot_tag = soup.find('span', {'data-testid': 'plot-l'})
+        details['Summary'] = plot_tag.text.strip() if plot_tag else "N/A"
+        
+        
+        year_tag = soup.find('span', {'data-testid': 'release-year'})
+        details['Year'] = year_tag.text.strip() if year_tag else "N/A"
+
+        rating_tag = soup.find('span', {'data-testid': 'rating--vote-count'})
+        details['Rating'] = rating_tag.text.strip() if rating_tag else "N/A"
+        
+        return details
+    except requests.exceptions.RequestException as e:
+        print(f"Error: Could not retrieve movie page - {e}")
+        return {'Error': 'Could not fetch data'}
+
+def find_movie_by_keyword(movies: list, keyword: str) -> dict:
+    keyword = keyword.lower()
+    best_match = None
+    best_score = 0
+    
+    for movie in movies:
+        title = movie['title'].lower()
+        score = 0
+        if keyword == title:
+            score = 100
+        elif keyword in title:
+            score = 80
+        elif all(word in title for word in keyword.split()):
+            score = 60
+        elif any(word in title for word in keyword.split()):
+            score = 40
+        
+        if score > best_score:
+            best_score = score
+            best_match = movie
+    return best_match if best_score >= 40 else None
+
+def main():
+    top_movies = get_top_250_movies()
+    
+    if not top_movies:
+        print("Failed to fetch top 250 movies. Exiting.")
+        return
+    
+    while True:
+        query = input("\nEnter a movie keyword or sentence (type 'exit' to quit): ")
+        if query.lower() == 'exit':
+            print("Thank you!")
+            break
+        
+        if not query:
+            print("Please enter a keyword.")
+            continue
+        
+        print(f"\nSearching for '{query}'...")
+        movie = find_movie_by_keyword(top_movies, query)
+        
+        if movie:
+            print("Movie found!")
+            details = get_movie_details(movie['url'])
+            print("\n" + "="*40)
+            print("         Movie Information")
+            print("="*40)
+            print(f"Movie Name: {details.get('Movie Name', 'N/A')}")
+            print(f"Year: {movie.get('year', 'N/A')}") 
+            print(f"URL: {movie['url']}")
+            print(f"Summary: {details.get('Summary', 'N/A')}")
+            print("="*40)
+        else:
+            print("Sorry, no matching movie was found in the top 250 list for your search.")
+
+if __name__ == "__main__":
+    main()
